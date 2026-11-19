@@ -12,8 +12,9 @@
 2. 阅读文集：创建/修改来源说明、查看样本、用真实业务字段追加记录；列表分页。
 3. 分析配置：冻结来源、参数和全部样本，进入Redis队列。
 4. 完整结果：真实算法摘要、专属诊断、全部CSV导出和可恢复失败态。
-5. 编辑衔接建议：分析师草案→负责人批准→阅读者下载批准快照。
-6. 审计：登录、来源修改、任务worker完成、业务说明批准等事件。
+5. 分层文集对照：选两个互不重叠的文集，受理时一起锁定会话及其分层；双侧Fisher精确检验加Holm校正，只发布全层方向反转的接续。
+6. 编辑衔接建议：分析师草案→负责人批准→阅读者下载批准快照。
+7. 审计：登录、来源修改、任务worker完成、对照完成、业务说明批准等事件。
 
 ## 快速启动
 
@@ -53,7 +54,7 @@ JWT有效期8小时；PBKDF2盐化哈希保存密码；角色每请求从数据�
 
 ## 实体与字段
 
-ReadingCollection / ReadingSession / TransitionRun / EditorialPlan 是核心实体；另有User和Audit。数据库实际表：`reading_collections` → `reading_sessions` → `transition_runs` → `editorial_plans`。样本以固定字段JSON保存，后端按以下字段严格验证，不接受未知字段替代必填值：匿名会话编号（`session`）、章节路径（用 > 分隔）（`path`）。
+ReadingCollection / ReadingSession / TransitionRun / ComparisonRun / EditorialPlan 是核心实体；另有User和Audit。数据库实际表：`reading_collections` → `reading_sessions` → `transition_runs` → `editorial_plans`，另含 `transition_comparisons`（分层对照任务）。样本以固定字段JSON保存，后端按以下字段严格验证，不接受未知字段替代必填值：匿名会话编号（`session`）、章节路径（用 > 分隔）（`path`）。
 
 实体贯穿 `backend/src/models`、`schemas`、`services`、`controllers`、`routes`，以及 `frontend/src/api/research.js`、`stores/research.js` 和 `pages`。`Source.key` 与 `(Record.source_id, reference)` 为自然键；来源改名不会修改已冻结任务输入。业务说明在创建时保存结果快照，批准后从该快照导出。
 
@@ -69,6 +70,18 @@ ReadingCollection / ReadingSession / TransitionRun / EditorialPlan 是核心实�
 失败态：业务字段缺失/非有限数值、参数越界、样本不足、退化特征或结构错误均明确拒绝或将任务标failed，错误消息保存在任务中。可回到来源或配置修正后重新执行，历史失败记录保留。
 
 已知边界：仅统计每行完整匿名会话内的相邻章节，拒绝会话编号重复；不是长序列规则挖掘。无跨会话拼接；提升度只是接续关联，不解释为因果。单章会话有效但不产生边。
+
+## 分层文集对照口径
+
+两组文集混看时，接续的强弱可能在合并口径与各分层口径之间正好反过来（辛普森式反转）。对照功能位于 `backend/src/services/comparison_algorithm.py`，前端不做任何统计计算。
+
+- **互不重叠与受理冻结**：必须选择两个不同来源；受理时把两组全部会话连同来源信息写入任务快照并确定分层，之后来源的并发追加不进入本次计算。
+- **分层**：按会话章节路径长度（章节数）分层；仅保留两组都至少有 1 个会话的可比层，只有一组有人数的层整体剔除并在结果中登记。
+- **会话级有无**：每条接续在同一会话内只计有无（出现即 1，同一会话重复经过仍为 1），不按经过次数重复计数。
+- **双侧精确检验**：对每条在可比层出现过的接续，固定各层组别人数及命中总数，在可比层合并出的 2×2 表上计算双侧 Fisher 精确概率（超几何分布固定边际），并给出 A 组期望命中数。
+- **Holm 校正**：对全部受检接续的原始 p 值一次性做 Holm 逐步校正；每行都带校正 p，校正齐全后结果才发布。
+- **发布范围**：页面只列合并方向与每一个可比层方向都相反的接续（持平层会阻止该标记），展示各层 A/B 人数、命中数、比例与校正概率；CSV 导出仍包含全部受检接续及逐层明细。
+- 关联不等于因果；对照回答的是“两组命中率在分层与合并口径下是否反向”，不解释成因。
 
 ## 演示数据与一天剧本
 
@@ -105,4 +118,4 @@ backend/migrations/001_initial.sql
 
 共享枚举：`backend/src/constants/enums.py` 与 `frontend/src/constants/enums.js` 都定义 admin/analyst/viewer、queued/running/completed/failed、draft/approved。后端service检查对应字符串；README为全量值说明。共享前端组件table/status/chart/business跨总览、结果、配置与复核复用；actions hook和format utils负责交互/格式。后端errors与rate_limit是两个中间件。
 
-测试及截图在批根 `test-artifacts/gb-0043/`，不混入源码。独立算法oracle、HTTP完整流程和真实Playwright浏览器流程见该目录 `TESTING.md`。License：MIT。
+测试及截图在批根 `test-artifacts/gb-0043/`，不混入源码。独立算法oracle、服务/worker/导出集成测试和真实Playwright浏览器流程见该目录 `TESTING.md`；其中 `oracle_comparison.py` 为分层对照的独立统计oracle（Fisher/Holm第二实现与辛普森反转构造，31项断言），`integration/integration_test.py` 在内存垫片上驱动真实服务代码（9项），两者仅依赖标准库，分别以 `python3 -I` 运行。License：MIT。
